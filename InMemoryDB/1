@@ -1,0 +1,132 @@
+#include <vector>
+#include <string>
+#include <utility>
+#include <optional>
+#include <unordered_map>
+#include <unordered_set>
+#include <map>
+#include <set>
+
+#pragma once 
+
+class DB{
+public:
+	using KeyType = std::string;
+	using FieldType = std::string; 
+	using ValueType = int; 
+	using TimeType = uint64_t;
+	using NullableTimeType = std::optional<TimeType>; 
+	struct RecordType{
+	    ValueType value;
+    	NullableTimeType created;
+    	NullableTimeType expires_at;   // absolute expiry, not remaining (is this right?) 
+	};
+	using ScanType = std::vector<std::pair<FieldType, RecordType>>; 
+	//L0 constructor... 
+		//perhaps with custom comparator for Field or Value types ?
+	//L1
+	bool set(KeyType key, FieldType field, ValueType value); 
+	std::optional<ValueType> get(KeyType key, FieldType field) const;
+	bool del(KeyType key, FieldType field);
+	//L2 - both sorted
+	std::optional<ScanType> scan(KeyType key) const;
+	std::optional<ScanType> scan_by_prefix(KeyType key, KeyType prefix) const; 
+	//L3 add timestamps to fields + TTL functionality
+		//operations arrive with monotonically increasing timestamps 
+	bool set_at(KeyType key, FieldType field, ValueType value, TimeType ts); 
+	std::optional<ValueType> get_at(KeyType key, FieldType field, TimeType ts) const;
+	bool del_at(KeyType key, FieldType field, TimeType ts);
+	bool set_with_ttl(KeyType key, FieldType field, ValueType value, TimeType ts, TimeType TTL); 
+	ScanType scan_at(KeyType key, TimeType ts) const; 
+	ScanType scan_by_prefix_at(KeyType key, KeyType prefix, TimeType ts) const;
+
+	//L4 - both in memory right now, can be a file later... 
+	bool backup(TimeType ts) const; 
+		//snapshot fields with TTL as having a "remaining time to live" 
+	bool restore(TimeType ts, TimeType ts_to_restore); 
+		//restore earliest snapshot taken at or before ts_to_restore, and ensure snapshotted fields w/ TTL restore with "remaining time to live"
+private:
+	std::unordered_map<KeyType, std::map<FieldType, RecordType> > map; 
+		//tuple is ts, expiry 
+//L4 stuff 
+	//for structural sharing 
+		//immer::map<KeyType, immer::map<FieldType, Entry>> db;
+		//auto snap = db;                         // O(1): copies one root pointer
+		//db = db.update(k, [&](auto inner) { return inner.set(field, entry); }); //writes are now O(logn) 
+	//for CoW 
+		/*
+		using RecordSet    = std::set<RecordType>;   // or map<FieldType, ...>, see below
+		using RecordSetPtr = std::shared_ptr<const RecordSet>;
+		std::unordered_map<KeyType, RecordSetPtr> map;
+
+		// snapshot: copy outer map; each inner set is shared via refcount bump
+		auto snap = map;
+
+		// write to key k:
+		auto next = std::make_shared<RecordSet>(*map[k]);  // copy only this key's set
+		next->insert(rec);
+		map[k] = std::move(next);
+		 */
+	//currently lazy expiry, we can extend to eager expiry by writing to a min-heap or ordered set whenever set_with_ttl is invoked 
+//DESIGN DECISIONS
+	//sorted scan 
+		//ordered map per record 
+		//unordered map and sort on each scan 
+	//expiry strategy
+		//lazy expiry - check on read and leave dead entries in memory
+		//eager expiry - min-heap or ordered set of expiry times 
+	//snapshot cost 
+		//full deep copy per backup is O(n) compute / memory minimum 
+		//structural sharing (persistent maps)... 
+		//copy-on-write... 
+};
+//Extensions (L5+)
+	//Semantics
+		//Conditional operations (compare_and_set, compare_and_get)
+		//Typed values - variant<int64, string> value type, increment and append operations. Handle type mismatch
+		//Out-of-order timestamps - operation1 w/ timestamp 5, operation2 with timestamp 10, operation2 can arrive before operation1 
+	//History
+		//Point-in-time reads - get_at_time(key, field, ts) returns the value as of any past ts. Per-field version chains, MVCC-lite. (?) 
+		//Undo/redo and modification history per key 
+		//Transactions - begin, commit, rollback, then nested transactions. How do they interact with TTL expiring mid-transaction? 
+	//Querying
+		//Pagination - scan with limit and a cursor, stable under concurrent modification (?) 
+		//Secondary index - find all keys where field == value, keep index consistent with deletions and expiry (?) 
+		//Top-k - return top-k records by field count or by value 
+	//Resources
+		//Capacity limits with eviction - LRU, LFU, or ARC across records, and how eviction interacts with TTL 
+		//Memory accounting per key 
+	//Systems
+		//Durability - write ahead log plus periodic snapshots, then crash recovery by replaying the log over the latest snapshot
+		//Concurrency - Start with a single lock, then a reader-write lock, then sharded locks per key. Define what consistency scan guarantees
+		//Subscriptions - let clients watch(key, prefix, callback) and get notified on change or expiry 
+//Pathway for extensions 
+	//History => Point-in-time reads 
+	//Semantics => Out of order snapshots 
+	//History => Transactions 
+
+//AI-generated clarification on point-in-time reads 
+	/*get_at(key, field, ts) treats ts as now. It reads the current state and only uses ts to check whether the current value has expired. Timestamps are monotonic, so there's no "past" to consult; any value that was overwritten or deleted is gone.
+
+	get_at_time(key, field, ts) treats ts as a historical moment, separate from now. It has to answer "what value was visible at that time," even if that value has since been overwritten, deleted, or expired. It's usually specified with two times, get_value_at(key, field, now_ts, target_ts), so the query itself happens at now_ts while asking about target_ts.
+
+	Example:
+
+	t=1  set(a, x, 10)
+	t=5  set(a, x, 20)
+	t=8  delete(a, x)
+	Query	Result
+	get_at(a, x, 9)	nothing (deleted)
+	get_at_time(a, x, now=9, target=3)	10
+	get_at_time(a, x, now=9, target=6)	20
+	get_at_time(a, x, now=9, target=8)	nothing (tombstone at 8)
+
+	Storage consequence: you can no longer overwrite in place. Each field becomes a version list of (write_ts, value or tombstone, expiry), sorted by write_ts. A read is then an upper_bound on target_ts, a step back one entry, and checks for tombstone and expiry relative to target_ts.
+
+	Questions this forces you to answer:
+
+	Unbounded memory. Do you keep history forever? If not, you need a retention window or GC horizon, and queries older than it return an error.
+	Interaction with restore. Does restore rewrite history, or append new versions at restore time? Appending is the MVCC-consistent answer; rewriting breaks past reads.
+	Expiry semantics. A value with TTL that expired at t=7 is invisible at target=7 but visible at target=6. This is where the half-open [ts, ts+ttl) decision starts to matter.
+	Scans at a past time. scan_at_time has to resolve every field's version independently, which is O(fields · log versions).
+	*/

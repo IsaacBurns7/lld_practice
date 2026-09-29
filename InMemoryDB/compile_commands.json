@@ -1,0 +1,38 @@
+[
+  {
+    "file": "src/DB.cpp",
+    "arguments": [
+      "/usr/bin/g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-O2",
+      "-MMD",
+      "-MP",
+      "-c",
+      "src/DB.cpp",
+      "-o",
+      "build/DB.o"
+    ],
+    "directory": "/Users/kingisaac/Github/lld_practice/InMemoryDB",
+    "output": "build/DB.o"
+  },
+  {
+    "file": "src/main.cpp",
+    "arguments": [
+      "/usr/bin/g++",
+      "-std=c++20",
+      "-Wall",
+      "-Wextra",
+      "-O2",
+      "-MMD",
+      "-MP",
+      "-c",
+      "src/main.cpp",
+      "-o",
+      "build/main.o"
+    ],
+    "directory": "/Users/kingisaac/Github/lld_practice/InMemoryDB",
+    "output": "build/main.o"
+  }
+]
